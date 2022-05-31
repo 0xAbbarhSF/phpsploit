@@ -4,7 +4,6 @@
 #   Run a test script or all tests contained in
 #   a given directory, in a recursive manner.
 
-
 #####
 # THIS CODE IS EXECUTED WHEN THIS SCRIPT
 # IS CALLED TO RUN A SINGLE TEST (from function execute_script())
@@ -78,7 +77,13 @@ function assert_no_output () {
 function decolorize () {
     sed -ri "s/\x01?\x1B\[(([0-9]+)(;[0-9]+)*)?m\x02?//g" "$1"
 }
+# remove multiple trailing newlines from input
+function rm_trailing_newlines () {
+    sed -Ez '$ s/\n+$/\n/'
+}
 function exit_script () {
+    set +e
+    set +o pipefail
     ret=$?
     if [ -n "$__phpsploit_pipe_pid" ]; then
         # cannot just kill phpsploit pipe, or coveragepy will not write report
@@ -94,6 +99,9 @@ function exit_script () {
         fi
     fi
     [ $ret -eq 0 ] && return # ignore if return value == 0
+    echo BASENAME > /dev/stderr
+    basename $TMPFILE > /dev/stderr
+    echo BASENAME > /dev/stderr
     files=$(find $TMPDIR -type f -name "`basename $TMPFILE`"'*')
     for file in $files; do
         varname="${file/$TMPFILE/\$TMPFILE}"
@@ -104,6 +112,8 @@ function exit_script () {
     # tail -n+1 /dev/null $files | tail -n+3
 }
 function phpsploit_pipe () {
+    set -e
+    set -o pipefail
     if [ -z "$__phpsploit_pipe_pid" ]; then
         # singleton, start piped phpsploit first time function is called
         rm -f $TMPDIR/fifo-in $TMPDIR/fifo-out
@@ -113,19 +123,32 @@ function phpsploit_pipe () {
         $PHPSPLOIT <&8 >&9 2>&1 &
         __phpsploit_pipe_pid=$!
     fi
-    randstr=`cat /dev/urandom | tr -dc A-Za-z0-9 | head -c 13`
+    # randstr=`cat /dev/urandom | tr -dc A-Za-z0-9 | head -c 13`
+    # using $RANDOM because GH Actions ubuntu VM has low entropy:
+    randstr=`echo "xxx$RANDOM$RANDOM$RANDOM" | md5sum | head -c 16`
     buf=$TMPDIR/buffer
+    > $buf
     echo -e "$@" >&8
     echo "@lrun echo $randstr" >&8 # delimiter
-    head -c 1 <&9 > $buf
+    # head -c 1 <&9 > $buf
     while ! grep -q "$randstr.*Returned " $buf; do
         timeout 0.05 cat <&9 >> $buf
     done
-    sed -i "/$randstr/d" $buf
+    # remove lines containing $randstr from output
+    cp $buf $buf.old
+    grep -v "$randstr" $buf.old > $buf
+    rm $buf.old
+    # write output to stdout
     cat $buf
     # try to get retval from last cmd (needs VERBOSITY True)
-    ret=`tail -n1 $buf | grep '^\[\#.*eturned [0-9]\+' | awk '{print $NF}'`
+    ret="$(tail -n1 $buf | grep '^\[\#.*eturned [0-9]\+' | awk '{print $NF}')"
+    echo BUFBUF > /dev/stderr
+    echo $ret > /dev/stderr
+    echo BUFBUF > /dev/stderr
+    set +e
+    set +o pipefail
     [ -n "$ret" ] && return $ret
+    return 99
 }
 # remove debug lines from input (phpsploit lines starting with '[#'
 function nodebug () {
@@ -179,6 +202,8 @@ function check_dependency () {
     fi
 }
 check_dependency basename
+check_dependency cat
+check_dependency tr
 check_dependency bash
 check_dependency diff
 check_dependency dirname
@@ -192,8 +217,10 @@ check_dependency printf
 check_dependency readlink
 check_dependency script
 check_dependency tail
+check_dependency head
 check_dependency tee
 check_dependency timeout
+check_dependency sed
 [ $errors -eq 0 ] || exit 1
 
 
@@ -207,6 +234,15 @@ function exit_help () {
     exit 1
 }
 
+# alias greadlink as `readlink` on macos
+if which greadlink &>/dev/null; then
+    shopt -s expand_aliases
+    alias readlink="greadlink"
+    alias sed="gsed"
+    alias grep="ggrep"
+    alias basename="gbasename"
+    alias md5sum="gmd5sum"
+fi
 
 # ROOTDIR = /phpsploit/
 export ROOTDIR="$(git rev-parse --show-toplevel)"
@@ -260,16 +296,40 @@ srv_pid=$!
 sleep 2 # give php server some time to init properly
 
 
+tests=0
+errors=0
 # called at script exit
 function atexit () {
     # kill php server
+    set +e
     [ -n "$srv_pid" ] && kill $srv_pid
+    if [ "$errors" -eq 0 ]; then
+        print_info "`banner ' TESTS SUMMARY '`"
+        print_info "All tests ($tests) succeeded! "
+        print_info TOTAL_TIME=$SECONDS
+        print_info "`banner`"
+        echo
+        exit 0
+    else
+        printf '\e[33;2m' # same color as in colored_stderr()
+        echo 'ps -fp $srv_pid'
+        ps -fp $srv_pid
+        echo 'cat "$WWWROOT/php.log"'
+        cat "$WWWROOT/php.log"
+        print_bad "`banner ' TESTS SUMMARY '`"
+        print_bad "Some tests ($errors/$tests) failed! "
+        print_info "TOTAL_TIME = $SECONDS"
+        if [ -n "$PHPSPLOIT_TESTS_FAIL_FAST" ]; then
+            print_info "PHPSPLOIT_TESTS_FAIL_FAST = True"
+        fi
+        print_bad "`banner`"
+        echo
+        exit 1
+    fi
 }
 trap atexit EXIT
 
 
-tests=0
-errors=0
 banner()(python -c 'print("'"$1"'".center(70, "="))')
 
 
@@ -277,6 +337,8 @@ banner()(python -c 'print("'"$1"'".center(70, "="))')
 # NOTE: only launched if is executable (chmod +x)
 function execute_script () {
     if [ -f "$1" -a -x "$1" -a "`readlink -f $1`" != "`readlink -f $0`" ]; then
+        (( ++tests ))
+        _test_time=$SECONDS
         print_info "`banner`"
         print_info "RUNNING $1 ..."
         print_info "`banner`"
@@ -290,16 +352,22 @@ function execute_script () {
         #if colored_stderr stdbuf -oL bash "$testscript" "$1"; then
         if colored_stderr bash "$testscript" "$1"; then
             print_good "$1 succeeded"
+            _test_time=$(( $SECONDS - $_test_time ))
+            print_info "TEST_TIME=${_test_time}s"
         else
             print_bad "$1 failed !"
+            _test_time=$(( $SECONDS - $_test_time ))
+            print_info "TEST_TIME=${_test_time}s"
             (( ++errors ))
+            if [ -n "$PHPSPLOIT_TESTS_FAIL_FAST" ]; then
+                exit
+            fi
         fi
 
         # undo script context
         cd - > /dev/null
 
         echo -e "\n"
-        (( ++tests ))
     fi
 }
 
@@ -347,23 +415,4 @@ if [ -n "$COVERAGE" ]; then
     find -name ".coverage\.*"
     coverage combine
     cd - > /dev/null
-fi
-if [ $errors -eq 0 ]; then
-    print_info "`banner ' TESTS SUMMARY '`"
-    print_info "All tests ($tests) succeeded! "
-    print_info "`banner`"
-    echo
-    exit 0
-else
-    printf '\e[33;2m' # same color as in colored_stderr()
-    echo 'ps -fP $srv_pid'
-    ps -fP $srv_pid
-    echo 'cat "$WWWROOT/php.log"'
-    cat "$WWWROOT/php.log"
-
-    print_bad "`banner ' TESTS SUMMARY '`"
-    print_bad "Some tests ($errors/$tests) failed! "
-    print_bad "`banner`"
-    echo
-    exit 1
 fi

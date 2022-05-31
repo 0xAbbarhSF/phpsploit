@@ -1,4 +1,4 @@
-name: CI
+name: Unit Tests
 
 # Controls when the workflow will run
 on:
@@ -18,26 +18,33 @@ jobs:
     strategy:
       fail-fast: true # quit as soon as a job fails
       matrix:
-        os: [ubuntu-latest] #, macos-latest, windows-latest]
-        python-version: [ "3.10" ]
+        os: [ macos-latest ] #, ubuntu-22.04, ubuntu-18.04 ]
+        python-version: [ "3.7" ] #, "3.10", "3.11.0-beta.3", "pypy3.7", "pypy3.10" ]
+        # exclude:
+        #   - os: macos-latest
+        #     python-version: 12
     # The type of runner that the job will run on
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 4
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v3
 
+      - if: startsWith(matrix.os, 'macOS')
+        name: Install coreutils (provides stdbuf)
+        run: brew install coreutils
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v3
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Display Python version
-        run: python -c "import sys; print(sys.version)"
-
-      - name: Install PhpSploit dependencies
+      - name: Install PhpSploit requirements.txt
         run: pip3 install -r requirements.txt
 
       - name: Run phpsploit unit tests
-        run: ./test/RUN.sh
+        run: stdbuf -oL -eL ./test/RUN.sh 2>&1
+        env:
+          PHPSPLOIT_TESTS_FAIL_FAST: True

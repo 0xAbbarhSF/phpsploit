@@ -5,6 +5,10 @@
 ### XXX: PUTTING THIS ON TOP OF TEST FILE BECAUSE SHOULD WORK EVEN IF NOT CONNECTED
 ###
 
+phpsploit_pipe anything > $TMPFILE
+echo XRET=$?
+[ "$xret" == "0" ] && FAIL
+
 # deleting an existing alias:
 # issue #59: `alias <VAR> None` misses verbosity
 phpsploit_pipe alias FOO BAR > $TMPFILE || FAIL
